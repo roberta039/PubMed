@@ -1,9 +1,9 @@
 import streamlit as st
 from Bio import Entrez
-from groq import Groq # Folosim Groq în loc de OpenAI
+from groq import Groq
 
 # Configurare pagină
-st.set_page_config(page_title="Asistent Medical Llama3", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="Medical Assistant", page_icon="🩺", layout="wide")
 
 # --- 1. SECRETS MANAGEMENT ---
 try:
@@ -27,24 +27,8 @@ client = Groq(api_key=api_key)
 
 # --- 2. FUNCȚII ---
 
-def translate_to_english(text):
-    """Traduce întrebarea în engleză folosind Llama 3"""
-    try:
-        completion = client.chat.completions.create(
-            model="llama3-70b-8192", # Model mare și gratuit
-            messages=[
-                {"role": "system", "content": "You are a translator. Translate the medical query to English keywords for PubMed. Return ONLY the keywords, nothing else."},
-                {"role": "user", "content": text}
-            ],
-            temperature=0,
-        )
-        return completion.choices[0].message.content
-    except Exception as e:
-        st.error(f"Eroare traducere: {e}")
-        return text
-
 def search_pubmed(query, email, max_results=5):
-    """Caută pe PubMed"""
+    """Caută pe PubMed direct cu termenul introdus"""
     Entrez.email = email
     try:
         # Căutare
@@ -58,7 +42,7 @@ def search_pubmed(query, email, max_results=5):
         if not id_list:
             return None
 
-        # Descărcare
+        # Descărcare detalii
         handle = Entrez.efetch(db="pubmed", id=id_list, rettype="medline", retmode="text")
         articles_text = handle.read()
         handle.close()
@@ -68,22 +52,27 @@ def search_pubmed(query, email, max_results=5):
         return None
 
 def generate_answer(query, context):
-    """Generează răspunsul final"""
+    """Generează răspunsul final folosind Llama 3.3"""
     prompt = f"""
-    Ești un asistent medical expert. Răspunde la întrebare în LIMBA ROMÂNĂ.
-    Folosește DOAR contextul de mai jos. Citează sursele (Autor, An).
+    Ești un asistent medical expert. Sarcina ta este să sintetizezi informația din studiile de mai jos.
     
-    Întrebare: {query}
+    Întrebarea utilizatorului: {query}
     
-    Context (Abstracte PubMed):
+    Context (Studii PubMed):
     {context}
+    
+    Instrucțiuni:
+    1. Răspunde în LIMBA ROMÂNĂ.
+    2. Folosește doar informațiile din context.
+    3. Dacă studiile nu sunt relevante, spune asta.
     """
     
     try:
+        # FOLOSIM NOUA VERSIUNE DE MODEL: llama-3.3-70b-versatile
         completion = client.chat.completions.create(
-            model="llama3-70b-8192", # Folosim modelul 70b pentru acuratețe mai mare
+            model="llama-3.3-70b-versatile", 
             messages=[
-                {"role": "system", "content": "Răspunzi mereu în limba română, profesionist."},
+                {"role": "system", "content": "Ești un medic cercetător care răspunde în limba română."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
@@ -93,32 +82,30 @@ def generate_answer(query, context):
         return f"Eroare AI: {e}"
 
 # --- 3. INTERFAȚA ---
-st.title("🩺 Asistent Medical (Llama 3 + PubMed)")
-st.markdown("Acest instrument este **gratuit** și folosește modelul Llama 3 pentru a analiza studii medicale.")
+st.title("🩺 PubMed AI Assistant (Groq Free)")
+st.markdown("""
+Acest asistent caută pe PubMed și sintetizează rezultatele.
+**Sfat:** Pentru cele mai bune rezultate, introduceți termenii de căutare în **Engleză** (ex: *aspirin side effects*), dar AI-ul va răspunde în Română.
+""")
 
-query = st.text_input("Întrebare (în Română):", placeholder="ex: Eficiența metforminei în prediabet")
+query = st.text_input("Termen de căutare (preferabil în Engleză):", placeholder="ex: immunotherapy lung cancer")
 
 if st.button("Caută"):
     if not query:
         st.warning("Scrie o întrebare.")
     else:
-        # 1. Traducere
-        with st.spinner("Traducem..."):
-            eng_query = translate_to_english(query)
-            st.caption(f"Căutăm: {eng_query}")
+        # 1. Căutare directă
+        with st.spinner("Căutăm studii pe PubMed..."):
+            pubmed_data = search_pubmed(query, email_address)
             
-        # 2. Căutare
-        with st.spinner("Căutăm studii..."):
-            pubmed_data = search_pubmed(eng_query, email_address)
-            
-        # 3. Analiză
+        # 2. Analiză
         if pubmed_data:
-            with st.expander("Vezi rezumatele studiilor"):
+            with st.expander("Vezi rezumatele studiilor (Engleză)"):
                 st.text(pubmed_data)
                 
-            with st.spinner("Llama 3 analizează datele..."):
+            with st.spinner("Llama 3.3 analizează datele..."):
                 ans = generate_answer(query, pubmed_data)
-                st.markdown("### Răspuns:")
+                st.markdown("### Răspuns Sintetizat (Română):")
                 st.write(ans)
         else:
-            st.error("Nu am găsit studii.")
+            st.error("Nu am găsit studii. Încearcă să folosești termeni în engleză.")
