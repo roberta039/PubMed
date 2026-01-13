@@ -1,61 +1,86 @@
 import streamlit as st
 from Bio import Entrez
 import openai
-import pandas as pd
 
 # Configurare pagină
 st.set_page_config(page_title="Asistent Medical PubMed", page_icon="🩺", layout="wide")
 
-# --- SECRETS MANAGEMENT ---
-# Încercăm să luăm cheile din secrets
+# --- 1. SECRETS MANAGEMENT ---
 try:
-    api_key = st.secrets["OPENAI_API_KEY"]
-    email_address = st.secrets["EMAIL_ADRESS"]
+    # Verificăm dacă cheile există
+    if "OPENAI_API_KEY" in st.secrets:
+        api_key = st.secrets["OPENAI_API_KEY"]
+    else:
+        st.error("Lipsește OPENAI_API_KEY din secrets.")
+        st.stop()
+        
+    if "EMAIL_ADRESS" in st.secrets:
+        email_address = st.secrets["EMAIL_ADRESS"]
+    else:
+        # Fallback dacă ai scris greșit ADDRESS sau ADRESS
+        email_address = st.secrets.get("EMAIL_ADDRESS", "email_generic@test.com")
+        
 except FileNotFoundError:
-    st.error("Cheile API nu sunt configurate! Te rog setează secrets.")
+    st.error("Fișierul secrets.toml nu a fost găsit! (Local)")
     st.stop()
-# ---------------------------
 
-st.title("🩺 Asistent Medical AI - PubMed Search")
-st.markdown("Căutare automată de studii și sinteză cu AI.")
+# --- 2. FUNCȚII ---
 
-# Sidebar simplificat (nu mai cerem cheia)
-with st.sidebar:
-    st.header("Opțiuni Căutare")
-    max_results = st.slider("Număr de studii de analizat", 1, 10, 5)
-    st.info("Aplicația folosește o cheie API pre-configurată.")
-
-# Funcția de căutare pe PubMed
-def search_pubmed(query, email, max_results=5):
-    Entrez.email = email
+def translate_to_english(text, api_key):
+    """Traduce întrebarea în engleză pentru PubMed folosind GPT"""
+    client = openai.OpenAI(api_key=api_key)
     try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a translator. Translate the following medical query to English keywords suitable for PubMed search. Return ONLY the English keywords."},
+                {"role": "user", "content": text}
+            ]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        st.error(f"Eroare la traducere: {e}")
+        return text # Returnăm textul original dacă eșuează
+
+def search_pubmed(query, email, max_results=5):
+    """Caută pe PubMed"""
+    Entrez.email = email
+    
+    try:
+        # Pasul A: Căutare ID-uri
         handle = Entrez.esearch(db="pubmed", term=query, retmax=max_results, sort="relevance")
         record = Entrez.read(handle)
         handle.close()
+        
         id_list = record["IdList"]
+        
+        # DEBUG: Vedem câți am găsit
+        st.write(f"ℹ️ PubMed a găsit {len(id_list)} articole pentru termenul: *{query}*")
 
         if not id_list:
             return None
 
+        # Pasul B: Descărcare conținut
         handle = Entrez.efetch(db="pubmed", id=id_list, rettype="medline", retmode="text")
         articles_text = handle.read()
         handle.close()
         return articles_text
+        
     except Exception as e:
-        st.error(f"Eroare PubMed: {e}")
+        st.error(f"⚠️ Eroare critică PubMed: {e}")
         return None
 
-# Funcția AI
 def generate_answer(query, context, api_key):
+    """Generează răspunsul final"""
     client = openai.OpenAI(api_key=api_key)
     
     prompt = f"""
-    Ești un asistent medical expert. Răspunde la întrebare folosind DOAR contextul de mai jos.
-    Citează autorii și anii studiilor.
+    Ești un asistent medical expert. Răspunde la întrebarea utilizatorului în LIMBA ROMÂNĂ.
+    Folosește informațiile din rezumatele de mai jos. Citează sursele (Autor, An).
     
-    Întrebare: {query}
+    Întrebare originală: {query}
     
-    Context (Studii):
+    Context (Studii PubMed):
     {context}
     """
 
@@ -63,7 +88,7 @@ def generate_answer(query, context, api_key):
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "Ești un asistent util și precis."},
+                {"role": "system", "content": "Ești un medic specialist care răspunde în limba română."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3
@@ -72,23 +97,33 @@ def generate_answer(query, context, api_key):
     except Exception as e:
         return f"Eroare AI: {e}"
 
-# Interfața
-query = st.text_input("Întrebare medicală:", placeholder="ex: Managementul diabetului tip 2 la pacienți vârstnici")
+# --- 3. INTERFAȚA ---
+st.title("🩺 Asistent Medical AI")
+st.markdown("Scrie întrebarea în **Română**. AI-ul o va traduce, va căuta studii internaționale și îți va răspunde în Română.")
 
-if st.button("Caută"):
+query = st.text_input("Întrebare:", placeholder="ex: Care sunt riscurile aspirinei la copii?")
+
+if st.button("Caută Răspuns"):
     if not query:
-        st.warning("Introduceți o întrebare.")
+        st.warning("Te rog scrie o întrebare.")
     else:
-        with st.spinner("Căutăm pe PubMed..."):
-            pubmed_data = search_pubmed(query, email_address, max_results)
+        # 1. Traducem
+        with st.spinner("Traducem întrebarea pentru PubMed..."):
+            english_query = translate_to_english(query, api_key)
+            st.caption(f"Termeni căutare (Engleză): {english_query}")
         
+        # 2. Căutăm
+        with st.spinner("Căutăm studii științifice..."):
+            pubmed_data = search_pubmed(english_query, email_address)
+        
+        # 3. Analizăm
         if pubmed_data:
-            with st.expander("Vezi rezumatele studiilor (Raw Data)"):
+            with st.expander("📄 Vezi datele brute (Abstracte în Engleză)"):
                 st.text(pubmed_data)
             
-            with st.spinner("Generăm răspunsul..."):
+            with st.spinner("🧠 AI-ul sintetizează răspunsul..."):
                 answer = generate_answer(query, pubmed_data, api_key)
-                st.markdown("### Răspuns Sintetizat:")
+                st.markdown("### 📝 Răspuns:")
                 st.write(answer)
         else:
-            st.error("Nu s-au găsit studii.")
+            st.error("Nu s-au găsit studii relevante. Încearcă să reformulezi întrebarea.")
